@@ -1,0 +1,20 @@
+{
+  "name": "vortex-bot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "firebase-admin": "^13.6.0",
+    "node-cron": "^4.2.1",
+    "node-fetch": "^2.7.0",
+    "onesignal-node": "^3.4.0"
+  }
+}
