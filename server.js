@@ -1,14 +1,14 @@
 const admin = require('firebase-admin');
 const fetch = require('node-fetch');
-const cron = require('node-cron');
-const OneSignal = require('onesignal-node');
 
 // 1. DATABASE CONFIGURATION
 const serviceAccount = require("./serviceAccountKey.json");
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
-});
+if (!admin.apps.length) {
+    admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount)
+    });
+}
 
 const db = admin.firestore();
 
@@ -17,11 +17,6 @@ const BOT_TOKEN = "8126112394:AAH7-da80z0C7tLco-ZBoZryH_6hhZBKfhE";
 const CHAT_ID = "@LivefootballVortex"; 
 const SITE_URL = "https://vortexlive.online";
 const GROUP_LINK = "https://t.me/+ZAygoaZr9VA2NGE0";
-
-const pushClient = new OneSignal.Client(
-  "83500a13-673b-486c-8d52-41e1b16d01a5", 
-  "os_v2_app_qniaue3hhnegzdksihq3c3ibuvycu6iikawe5pv4vnrhcvj57uicm5t4254eshiwukdbzast6b6ekcnh6woskgovlchrq7gvtnrydhi"
-);
 
 let lastKnownData = {}; 
 
@@ -43,67 +38,79 @@ async function sendTelegram(text) {
     if (res.ok) console.log("✅ Telegram Sent");
     else console.log("⚠️ TG Error:", res.description);
   } catch (err) {
-    console.error("❌ Connection Error:", err);
+    console.error("❌ TG Connection Error:", err.message);
   }
 }
 
-async function sendWebPush(title, message) {
-  try {
-    await pushClient.createNotification({
-      contents: { 'en': message },
-      headings: { 'en': title },
-      included_segments: ['Subscribed Users'],
-      url: SITE_URL
-    });
-  } catch (e) { console.error("❌ Push Error"); }
-}
+// --- 4. REAL-TIME WATCHER (FIXED RESTART LOOP) ---
 
-// --- 4. REAL-TIME WATCHER ---
+function startListening() {
+  console.log("📡 Vortex Brain: Connecting to Firebase...");
 
-db.collection('fixtures').onSnapshot((snapshot) => {
-  snapshot.docChanges().forEach((change) => {
-    const data = change.doc.data();
-    const matchId = change.doc.id;
-    const scoreKey = `${matchId}_score`;
-    const statusKey = `${matchId}_status`;
-    const currentScore = `${data.homeScore || 0}-${data.awayScore || 0}`;
-    const currentStatus = data.status;
+  // Attach the snapshot listener
+  const unsub = db.collection('fixtures').onSnapshot((snapshot) => {
+    // If we reach here, connection is successful
+    console.log(`🟢 Live: Monitoring ${snapshot.size} matches.`);
 
-    if (!lastKnownData[statusKey]) {
+    snapshot.docChanges().forEach((change) => {
+      const data = change.doc.data();
+      const matchId = change.doc.id;
+      
+      const currentScore = `${data.homeScore || 0}-${data.awayScore || 0}`;
+      const currentStatus = (data.status || 'NS').toUpperCase();
+      
+      const scoreKey = `${matchId}_score`;
+      const statusKey = `${matchId}_status`;
+
+      // 1. First time seeing the match? Store and move on.
+      if (lastKnownData[statusKey] === undefined) {
+        lastKnownData[scoreKey] = currentScore;
+        lastKnownData[statusKey] = currentStatus;
+        return;
+      }
+
+      // 2. GOAL OR VAR ALERT (Works for both +1 and -1)
+      if (lastKnownData[scoreKey] !== currentScore) {
+        const [oldH, oldA] = lastKnownData[scoreKey].split('-').map(Number);
+        const isVAR = (data.homeScore < oldH || data.awayScore < oldA);
+        
+        const header = isVAR ? "🖥 *VAR: GOAL CANCELLED*" : "⚽ *GOAL ALERT!*";
+        sendTelegram(`${header}\n\n🏆 ${data.league}\n🔥 *${data.home} ${data.homeScore} - ${data.awayScore} ${data.away}*\n\n🔗 [WATCH LIVE](${SITE_URL})`);
+      }
+
+      // 3. STATUS ALERT
+      if (lastKnownData[statusKey] !== currentStatus) {
+        let msg = "";
+        if (currentStatus === '1H' || currentStatus === 'LIVE') {
+          msg = `🎬 *KICK OFF!* \n\n*${data.home} vs ${data.away}* is LIVE!`;
+        } else if (currentStatus === 'HT') {
+          msg = `⏸ *HALF TIME* \n\n*${data.home} ${currentScore} ${data.away}*`;
+        } else if (currentStatus === '2H') {
+          msg = `▶️ *SECOND HALF* \n\n*${data.home} vs ${data.away}* is back underway!`;
+        } else if (currentStatus === 'FT') {
+          msg = `🏁 *FULL TIME* \n\n*${data.home} ${currentScore} ${data.away}*\n\n💬 [JOIN DISCUSSION](${GROUP_LINK})`;
+        }
+        
+        if (msg) sendTelegram(`${msg}\n👉 [WATCH](${SITE_URL})`);
+      }
+
+      // Update memory
       lastKnownData[scoreKey] = currentScore;
       lastKnownData[statusKey] = currentStatus;
-      return;
-    }
-
-    // A. GOAL DETECTION
-    if (lastKnownData[scoreKey] !== currentScore) {
-      const msg = `⚽ *GOAL ALERT!* \n\n🏆 ${data.league}\n🔥 *${data.home} ${data.homeScore} - ${data.awayScore} ${data.away}*\n\n🔗 [WATCH LIVE](${SITE_URL})`;
-      sendTelegram(msg);
-      sendWebPush("⚽ GOAL!", `${data.home} ${currentScore} ${data.away}`);
-    }
-
-    // B. STATUS DETECTION
-    if (lastKnownData[statusKey] !== currentStatus) {
-      let statusUpdate = "";
-      if (currentStatus === '1H' || currentStatus === 'LIVE') {
-        statusUpdate = `🎬 *KICK OFF!* \n\n*${data.home} vs ${data.away}* is LIVE!`;
-      } else if (currentStatus === 'HT') {
-        statusUpdate = `⏸ *HALF TIME* \n\n*${data.home} ${currentScore} ${data.away}*`;
-      } else if (currentStatus === '2H') {
-        statusUpdate = `▶️ *SECOND HALF* \n\n*${data.home} vs ${data.away}* is back!`;
-      } else if (currentStatus === 'FT') {
-        statusUpdate = `🏁 *FULL TIME* \n\n*${data.home} ${currentScore} ${data.away}*\n\n💬 [JOIN DISCUSSION](${GROUP_LINK})`;
-      }
-
-      if (statusUpdate) {
-        sendTelegram(`${statusUpdate}\n👉 [WATCH](${SITE_URL})`);
-      }
-    }
-
-    lastKnownData[scoreKey] = currentScore;
-    lastKnownData[statusKey] = currentStatus;
+    });
+  }, (err) => {
+    // CRITICAL: Stop the crash loop by logging the actual error
+    console.error("❌ FIREBASE ERROR:", err.code, "-", err.message);
+    
+    // If it's a permission issue, don't restart too fast
+    const delay = err.code === 'permission-denied' ? 30000 : 5000;
+    console.log(`🔄 Restarting in ${delay/1000}s...`);
+    
+    unsub(); 
+    setTimeout(startListening, delay);
   });
-});
+}
 
-// STARTUP TEST
-sendTelegram(`🤖 *Vortex Live Bot:* Connected to ${SITE_URL}`);
+// Initial Bot Start Message
+startListening();
+sendTelegram(`🤖 *Vortex Live Bot:* System Online 🌍`);
