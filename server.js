@@ -1,7 +1,7 @@
 const admin = require('firebase-admin');
-const fetch = require('node-fetch');
-const TelegramBot = require('node-telegram-bot-api'); // New
-const cron = require('node-cron'); // New
+const axios = require('axios');
+const TelegramBot = require('node-telegram-bot-api');
+const cron = require('node-cron');
 const serviceAccount = require("./serviceAccountKey.json");
 
 // 1. INITIALIZE FIREBASE
@@ -12,112 +12,79 @@ const db = admin.firestore();
 
 // 2. CONFIGURATION
 const BOT_TOKEN = "8126112394:AAH7-da80z0C7tLco-ZBoZryH_6hhZBKfhE";
-const CHAT_ID = "-1003687297299"; // Your verified numeric ID
+const CHAT_ID = "-1003687297299";
 const SITE_URL = "https://vortexlive.online";
 
-// Initialize the Bot for "Listening"
+// API KEYS (Ensure these are valid)
+const KEY_API_SPORTS = '0131b99f8e87a724c92f8b455cc6781d'; 
+
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
-let lastKnownData = {};
-
-// --- EXISTING FUNCTION: Send Telegram Alerts (Firebase) ---
-async function sendTelegram(text) {
+// --- SYNC FUNCTION: Daily Match Creation ---
+async function syncMatches() {
     try {
-        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chat_id: CHAT_ID, text: text, parse_mode: 'Markdown', disable_web_page_preview: true })
+        const res = await axios.get('https://v3.football.api-sports.io/fixtures', {
+            params: { date: new Date().toISOString().split('T')[0] }, // Get today's matches
+            headers: { 'x-apisports-key': KEY_API_SPORTS }
         });
-        console.log("✅ Telegram Alert Sent");
-    } catch (err) { console.error("❌ Error:", err.message); }
+
+        const matches = res.data.response;
+        const batch = db.batch();
+
+        matches.forEach(m => {
+            const docRef = db.collection('matches').doc(String(m.fixture.id));
+            batch.set(docRef, {
+                fixtureId: m.fixture.id,
+                homeTeam: { name: m.teams.home.name, logo: m.teams.home.logo },
+                awayTeam: { name: m.teams.away.name, logo: m.teams.away.logo },
+                status: m.fixture.status.short,
+                league: m.league.name,
+                kickOffTime: m.fixture.date,
+                // Default slots for Triple Servers
+                streamUrl1: "", 
+                streamUrl2: "", 
+                streamUrl3: "", 
+                activeServer: 1
+            }, { merge: true });
+        });
+
+        await batch.commit();
+        console.log(`✅ Database Synced: ${matches.length} matches added.`);
+    } catch (err) { console.error("Sync Error:", err.message); }
 }
 
-// --- NEW FEATURE 1: AUTO-ENGAGEMENT MESSAGES (Every 4 Hours) ---
-cron.schedule('0 */4 * * *', () => {
-    const promoMessages = [
-        "⚽ Don't miss the action! Live streams are active now on Vortex Arena.",
-        "🔥 New match stats have been updated. Check the site!",
-        "🎯 Looking for today's best odds? Check the latest games on our site."
-    ];
-    const randomMsg = promoMessages[Math.floor(Math.random() * promoMessages.length)];
-    sendTelegram(randomMsg);
-    console.log("⏰ Scheduled promo sent.");
-});
+// --- COMMANDS FOR MANUAL UPDATES (Your Phone) ---
 
-// --- NEW FEATURE 2: BETTING CODE FORWARDER ---
-bot.on('message', (msg) => {
-    // Regex to detect codes: 6 to 12 characters, uppercase and numbers
-    const betCodeRegex = /\b[A-Z0-9]{6,12}\b/g;
-    
-    // Ignore messages from your own channel to avoid loops
-    if (msg.text && msg.chat.id.toString() !== CHAT_ID) {
-        const foundCodes = msg.text.match(betCodeRegex);
-        
-        if (foundCodes) {
-            const forwardText = `🎯 **New Bet Code Detected**\n\n` +
-                                `Code: \`${foundCodes[0]}\` \n` +
-                                `Source: ${msg.chat.title || "External Group"}\n\n` +
-                                `👉 [Watch Live Matches](${SITE_URL})`;
-
-            bot.sendMessage(CHAT_ID, forwardText, { parse_mode: 'Markdown' });
-            console.log(`➡️ Forwarded code ${foundCodes[0]} to channel.`);
-        }
-    }
-});
-
-// --- EXISTING LOGIC: Firebase Polling ---
-async function pollVortexEngine() {
+// 1. Update Server 3 (Your "Gold" Link)
+// Usage: /gold [fixtureId] [url]
+bot.onText(/\/gold (\d+) (.+)/, async (msg, match) => {
+    const id = match[1];
+    const url = match[2];
     try {
-        const snapshot = await db.collection('fixtures').get();
-        snapshot.forEach(doc => {
-            const data = doc.data();
-            const matchId = doc.id;
-            const currentScore = `${data.homeScore || 0}-${data.awayScore || 0}`;
-            const currentStatus = (data.status || 'NS').toUpperCase();
-            const lastEvent = data.lastEvent;
-            const eventTeam = data.eventTeam || "a team";
-            const eventTime = data.eventTime || 0;
-
-            const scoreKey = `${matchId}_score`;
-            const statusKey = `${matchId}_status`;
-            const eventKey = `${matchId}_event_${eventTime}`;
-
-            if (lastKnownData[scoreKey] === undefined) {
-                lastKnownData[scoreKey] = currentScore;
-                lastKnownData[statusKey] = currentStatus;
-                lastKnownData[eventKey] = true;
-                return;
-            }
-
-            if (lastKnownData[scoreKey] !== currentScore) {
-                const [oldH, oldA] = lastKnownData[scoreKey].split('-').map(Number);
-                const isVAR = ((data.homeScore || 0) < oldH || (data.awayScore || 0) < oldA);
-                const header = isVAR ? "🖥 *VAR: GOAL CANCELLED*" : "⚽ *GOAL ALERT!*";
-                sendTelegram(`${header}\n\n🏆 ${data.league || 'Football'}\n🔥 *${data.home} ${currentScore} ${data.away}*\n\n🔗 [WATCH LIVE](${SITE_URL})`);
-                lastKnownData[scoreKey] = currentScore;
-            }
-
-            if (lastKnownData[statusKey] !== currentStatus) {
-                let msg = "";
-                if (currentStatus === '1H') msg = `🎬 *KICK OFF!* \n*${data.home} vs ${data.away}* is LIVE!`;
-                if (currentStatus === 'HT') msg = `⏸ *HALF TIME* \n*${data.home} ${currentScore} ${data.away}*`;
-                if (currentStatus === 'FT') msg = `🏁 *FULL TIME* \n*${data.home} ${currentScore} ${data.away}*`;
-                if (msg) sendTelegram(`${msg}\n🔗 [WATCH](${SITE_URL})`);
-                lastKnownData[statusKey] = currentStatus;
-            }
-
-            if (lastEvent && !lastKnownData[eventKey]) {
-                let eventMsg = "";
-                if (lastEvent === 'RED_CARD') eventMsg = `🟥 *RED CARD!* \nDrama! *${eventTeam}* has been sent off in *${data.home} vs ${data.away}*!`;
-                if (lastEvent === 'PENALTY') eventMsg = `🎯 *PENALTY!* \nReferee points to the spot for *${eventTeam}* in *${data.home} vs ${data.away}*!`;
-                if (lastEvent === 'VAR') eventMsg = `🖥 *VAR CHECK!* \nRef is consulting the screen in *${data.home} vs ${data.away}*...`;
-                
-                if (eventMsg) sendTelegram(`${eventMsg}\n🔗 [WATCH](${SITE_URL})`);
-                lastKnownData[eventKey] = true;
-            }
+        await db.collection('matches').doc(id).update({ 
+            streamUrl3: url, 
+            status: 'LIVE',
+            activeServer: 3 
         });
-    } catch (err) { console.error("🔥 Error:", err.message); }
-}
+        bot.sendMessage(msg.chat.id, `🏆 GOLD LINK ACTIVE!\nMatch: ${id}\nServer 3 is now primary.`);
+    } catch (e) { bot.sendMessage(msg.chat.id, "❌ Match ID not found."); }
+});
 
-setInterval(pollVortexEngine, 3000);
-console.log("🚀 Vortex Engine Online with Telegram Bot Listening...");
+// 2. Update Server 1 or 2
+// Usage: /stream1 [fixtureId] [url]
+bot.onText(/\/stream(\d) (\d+) (.+)/, async (msg, match) => {
+    const serverNum = match[1];
+    const id = match[2];
+    const url = match[3];
+    const field = `streamUrl${serverNum}`;
+
+    try {
+        await db.collection('matches').doc(id).update({ [field]: url });
+        bot.sendMessage(msg.chat.id, `✅ Server ${serverNum} updated for Match ${id}`);
+    } catch (e) { bot.sendMessage(msg.chat.id, "❌ Error updating server."); }
+});
+
+// Run Sync daily at 6AM
+cron.schedule('0 6 * * *', syncMatches);
+
+console.log("🚀 Vortex Manager Bot Online...");
