@@ -1,21 +1,22 @@
 {
   "name": "vortex-bot",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Vortex Live Automation Bot",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node server.js"
   },
   "keywords": [],
-  "author": "",
+  "author": "Vortex",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "firebase-admin": "^13.6.0",
-    "node-cron": "^4.2.1",
+    "express": "^4.22.1",
+    "firebase-admin": "^12.0.0",
+    "node-cron": "^3.0.3",
     "node-fetch": "^2.7.0",
-    "node-telegram-bot-api": "^0.67.0",
+    "node-telegram-bot-api": "^0.66.0",
     "onesignal-node": "^3.4.0"
   }
 }
