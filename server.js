@@ -5,6 +5,7 @@ const cron = require('node-cron');
 const express = require('express');
 
 // --- RENDER HEALTH CHECK SERVER ---
+// Render requires a web server to stay active on the free tier
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -19,7 +20,7 @@ app.listen(PORT, () => {
 // --- 1. INITIALIZE FIREBASE (Render-Safe Version) ---
 if (!admin.apps.length) {
     try {
-        // We parse the JSON from an environment variable instead of a file
+        // Parse the JSON from the 'FIREBASE_CONFIG' environment variable
         const serviceAccount = JSON.parse(process.env.FIREBASE_CONFIG);
         admin.initializeApp({ 
             credential: admin.credential.cert(serviceAccount) 
@@ -33,7 +34,6 @@ const db = admin.firestore();
 
 // --- 2. CONFIGURATION ---
 const BOT_TOKEN = process.env.BOT_TOKEN || "8126112394:AAH7-da80z0C7tLco-ZBoZryH_6hhZBKfhE";
-const SITE_URL = "https://vortexlive.online";
 const KEY_API_SPORTS = process.env.KEY_API_SPORTS || '0131b99f8e87a724c92f8b455cc6781d'; 
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
@@ -45,7 +45,7 @@ async function syncMatches() {
         const res = await axios.get('https://v3.football.api-sports.io/fixtures', {
             params: { 
                 date: new Date().toISOString().split('T')[0],
-                status: 'NS-1H-HT-2H-LIVE' // Fetch scheduled and live matches
+                status: 'NS-1H-HT-2H-LIVE' 
             }, 
             headers: { 'x-apisports-key': KEY_API_SPORTS }
         });
@@ -91,7 +91,7 @@ bot.onText(/\/gold (\d+) (.+)/, async (msg, match) => {
             status: 'LIVE',
             activeServer: 3 
         });
-        bot.sendMessage(msg.chat.id, `🏆 GOLD LINK ACTIVE!\nMatch ID: ${id}\nServer 3 is now the premium source.`);
+        bot.sendMessage(msg.chat.id, `🏆 GOLD LINK ACTIVE!\nMatch ID: ${id}\nServer 3 is now primary.`);
     } catch (e) { 
         bot.sendMessage(msg.chat.id, "❌ Match ID not found in database."); 
     }
@@ -108,14 +108,14 @@ bot.onText(/\/stream(\d) (\d+) (.+)/, async (msg, match) => {
         await db.collection('matches').doc(id).update({ [field]: url });
         bot.sendMessage(msg.chat.id, `✅ Server ${serverNum} updated for Match ${id}`);
     } catch (e) { 
-        bot.sendMessage(msg.chat.id, "❌ Error updating server. Check the ID."); 
+        bot.sendMessage(msg.chat.id, "❌ Error updating server."); 
     }
 });
 
 // Run Sync daily at 6AM
 cron.schedule('0 6 * * *', syncMatches);
 
-// Manual trigger command for you to test everything
+// Manual trigger command
 bot.onText(/\/sync/, (msg) => {
     bot.sendMessage(msg.chat.id, "🔄 Manual sync started...");
     syncMatches();
