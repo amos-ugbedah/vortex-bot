@@ -25,57 +25,78 @@ const db = admin.firestore();
 // --- 2. CONFIGURATION ---
 const BOT_TOKEN = process.env.BOT_TOKEN || "8126112394:AAH7-da80z0C7tLco-ZBoZryH_6hhZBKfhE";
 const KEY_API_SPORTS = process.env.KEY_API_SPORTS || '0131b99f8e87a724c92f8b455cc6781d'; 
+const CHANNEL_ID = "-1003687297299"; // Your Telegram Channel ID
+
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
-// List of "Important" League IDs (Premier League, UCL, La Liga, Serie A, Bundesliga, Ligue 1, etc.)
-const TOP_LEAGUES = [39, 140, 135, 78, 61, 2, 3, 848, 143]; 
+/**
+ * PRIORITY LEAGUE IDS:
+ * 1: AFCON, 2: UCL, 3: Europa League, 39: Premier League, 45: FA Cup, 
+ * 140: La Liga, 135: Serie A, 78: Bundesliga, 61: Ligue 1
+ */
+const PRIORITY_LEAGUES = [1, 2, 3, 39, 45, 140, 135, 78, 61, 848];
 
 // --- 3. SMART SYNC FUNCTION ---
 async function syncMatches(chatId = null) {
     try {
-        if (chatId) bot.sendMessage(chatId, "⚽ Fetching top 40 important matches...");
+        if (chatId) bot.sendMessage(chatId, "⚽ Syncing Top Matches (AFCON, FA Cup, Big Leagues)...");
         
+        const today = new Date().toISOString().split('T')[0];
         const res = await axios.get('https://v3.football.api-sports.io/fixtures', {
-            params: { 
-                date: new Date().toISOString().split('T')[0],
-                status: 'NS-1H-HT-2H-LIVE' 
-            }, 
+            params: { date: today }, 
             headers: { 'x-apisports-key': KEY_API_SPORTS }
         });
 
-        let matches = res.data.response;
-        if (!matches || matches.length === 0) {
+        let allMatches = res.data.response;
+        if (!allMatches || allMatches.length === 0) {
             if (chatId) bot.sendMessage(chatId, "⚠️ No matches found for today.");
             return;
         }
 
-        // FILTER: Only keep matches from Top Leagues OR matches involving major teams
-        // SORT: Move matches from Top Leagues to the top of the list
-        matches = matches.filter(m => TOP_LEAGUES.includes(m.league.id))
-                         .slice(0, 40); // Limit to top 40 for performance and clarity
+        // FILTER: Keep only matches from Priority Leagues
+        // SORT: Order by Kickoff Time
+        let filteredMatches = allMatches
+            .filter(m => PRIORITY_LEAGUES.includes(m.league.id))
+            .sort((a, b) => new Date(a.fixture.date) - new Date(b.fixture.date))
+            .slice(0, 40);
+
+        if (filteredMatches.length === 0) {
+            if (chatId) bot.sendMessage(chatId, "⚠️ No priority matches found today. Website list remains unchanged.");
+            return;
+        }
 
         const batch = db.batch();
-        matches.forEach(m => {
-            const docRef = db.collection('matches').doc(String(m.fixture.id));
+        let channelText = `📅 *TODAY'S TOP FIXTURES* (${today})\n\n`;
+
+        filteredMatches.forEach(m => {
+            const matchId = String(m.fixture.id);
+            const kickOffTime = new Date(m.fixture.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+            const docRef = db.collection('matches').doc(matchId);
             batch.set(docRef, {
                 fixtureId: m.fixture.id,
                 homeTeam: { name: m.teams.home.name, logo: m.teams.home.logo },
                 awayTeam: { name: m.teams.away.name, logo: m.teams.away.logo },
                 status: m.fixture.status.short,
                 league: m.league.name,
-                leagueId: m.league.id,
-                kickOffTime: m.fixture.date,
+                kickOffTime: m.fixture.date, // This sends the full ISO string for the website
                 timestamp: admin.firestore.FieldValue.serverTimestamp(),
                 streamUrl1: "", 
                 streamUrl2: "", 
                 streamUrl3: "", 
                 activeServer: 1
             }, { merge: true });
+
+            channelText += `⏰ ${kickOffTime} | ${m.teams.home.name} vs ${m.teams.away.name}\n`;
+            channelText += `🆔 Match ID: \`${matchId}\`\n🔗 Watch: vortexlive.online\n\n`;
         });
 
         await batch.commit();
-        const successMsg = `✅ Sync Complete! ${matches.length} top-tier matches added to website.`;
-        console.log(successMsg);
+
+        // Auto-Post to Channel
+        await bot.sendMessage(CHANNEL_ID, channelText, { parse_mode: 'Markdown' });
+
+        const successMsg = `✅ Sync Complete! ${filteredMatches.length} matches updated and posted to Channel.`;
         if (chatId) bot.sendMessage(chatId, successMsg);
 
     } catch (err) { 
@@ -86,53 +107,61 @@ async function syncMatches(chatId = null) {
 
 // --- 4. TELEGRAM COMMANDS ---
 
-// List IDs (Crucial for managing links)
+// List IDs (Next 20 Games)
 bot.onText(/\/list/, async (msg) => {
     try {
         const snapshot = await db.collection('matches').orderBy('kickOffTime', 'asc').limit(20).get();
-        if (snapshot.empty) return bot.sendMessage(msg.chat.id, "📭 No matches in database. Run /sync first.");
+        if (snapshot.empty) return bot.sendMessage(msg.chat.id, "📭 No matches found. Run /sync first.");
 
-        let message = "📅 **Match IDs (Next 20 Games):**\n\n";
+        let message = "📅 **Active Match IDs:**\n\n";
         snapshot.forEach(doc => {
             const m = doc.data();
             const time = new Date(m.kickOffTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            message += `⏰ ${time} | ${m.homeTeam.name} vs ${m.awayTeam.name}\n🆔 ID: \`${doc.id}\`\n\n`;
+            message += `⚽ ${m.homeTeam.name} vs ${m.awayTeam.name}\n🆔 ID: \`${doc.id}\` | ⏰ ${time}\n\n`;
         });
         bot.sendMessage(msg.chat.id, message, { parse_mode: 'Markdown' });
-    } catch (e) {
-        bot.sendMessage(msg.chat.id, "❌ Error fetching list.");
-    }
+    } catch (e) { bot.sendMessage(msg.chat.id, "❌ Error fetching list."); }
 });
 
-// Update Gold Server (Server 3)
-bot.onText(/\/gold (\d+) (.+)/, async (msg, match) => {
-    const id = match[1];
-    const url = match[2];
-    try {
-        await db.collection('matches').doc(id).update({ 
-            streamUrl3: url, 
-            status: 'LIVE',
-            activeServer: 3 
-        });
-        bot.sendMessage(msg.chat.id, `🏆 **GOLD LINK ACTIVE**\nMatch: ${id}\nServer 3 is now primary.`);
-    } catch (e) { bot.sendMessage(msg.chat.id, "❌ Match ID not found."); }
-});
-
-// Update Server 1 or 2
+// Update Link & Make Button Clickable
 bot.onText(/\/stream(\d) (\d+) (.+)/, async (msg, match) => {
     const serverNum = match[1];
     const id = match[2];
     const url = match[3];
     try {
-        await db.collection('matches').doc(id).update({ [`streamUrl${serverNum}`]: url });
-        bot.sendMessage(msg.chat.id, `✅ Server ${serverNum} updated for ID ${id}`);
-    } catch (e) { bot.sendMessage(msg.chat.id, "❌ Update failed."); }
+        await db.collection('matches').doc(id).update({ 
+            [`streamUrl${serverNum}`]: url,
+            status: 'LIVE' // Sets status to LIVE to ensure button shows up
+        });
+        bot.sendMessage(msg.chat.id, `✅ Server ${serverNum} Link Added!\nMatch ${id} is now clickable on the site.`);
+    } catch (e) { bot.sendMessage(msg.chat.id, "❌ Error: ID not found."); }
 });
 
-// Sync Command
 bot.onText(/\/sync/, (msg) => syncMatches(msg.chat.id));
 
-// Auto-run sync daily at 6AM
+// Auto-run at 6AM daily
 cron.schedule('0 6 * * *', () => syncMatches());
 
-console.log("🚀 Vortex Manager Bot Online (Top 40 Mode)...");
+console.log("🚀 Vortex Elite Bot Online...");
+
+// Add this temporary command to clear the junk
+bot.onText(/\/clearall/, async (msg) => {
+    try {
+        bot.sendMessage(msg.chat.id, "🧹 Cleaning up matches... please wait.");
+        
+        const snapshot = await db.collection('matches').get();
+        if (snapshot.empty) {
+            return bot.sendMessage(msg.chat.id, "✅ Database is already empty.");
+        }
+
+        const batch = db.batch();
+        snapshot.forEach(doc => {
+            batch.delete(doc.ref);
+        });
+
+        await batch.commit();
+        bot.sendMessage(msg.chat.id, `🗑️ Deleted ${snapshot.size} matches. Your database is now fresh!`);
+    } catch (e) {
+        bot.sendMessage(msg.chat.id, "❌ Error during cleanup: " + e.message);
+    }
+});
