@@ -13,7 +13,7 @@ admin.initializeApp({
 });
 const db = admin.firestore();
 
-// 2. CONFIGURATION (Render Environment Variables)
+// 2. CONFIGURATION
 const SECRET_KEY = process.env.STREAM_SECRET_KEY || 'Vortex_Secure_2026';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHANNEL_ID = process.env.TELEGRAM_CHANNEL_ID;
@@ -49,14 +49,21 @@ const sendTelegram = async (text) => {
   } catch (err) { console.error("❌ Telegram Notify Error"); }
 };
 
-// --- STREAM LINK GENERATOR (Fallback) ---
-const resolveStreamUrl = (home, away, existingUrl) => {
-  // If you manually pasted a working link in Firebase, keep it!
+// --- SMART TRIPLE-STREAM RESOLVER ---
+const resolveStream = (home, away, slot, existingUrl) => {
+  // If you manually pasted a link in Firebase for this slot, keep it!
   if (existingUrl && existingUrl.includes('http')) return existingUrl;
   
-  // Dynamic fallback: Search for the specific match on a known sports aggregator
-  const query = encodeURIComponent(`${home} vs ${away} live stream free`);
-  return `https://www.google.com/search?q=${query}`; 
+  const query = encodeURIComponent(`${home} vs ${away} live stream`);
+  
+  // Provide different fallback search engines for each slot
+  const fallbacks = {
+    1: `https://www.google.com/search?q=${query}`,
+    2: `https://www.bing.com/search?q=${query}`,
+    3: `https://duckduckgo.com/?q=${query}`
+  };
+  
+  return fallbacks[slot] || fallbacks[1];
 };
 
 // --- CORE SYNC & SORTING ---
@@ -92,18 +99,19 @@ const syncMatches = async () => {
         status: item.fixture.status.short, 
         elapsed: item.fixture.status.elapsed || 0,
         timestamp: item.fixture.timestamp,
-        streamUrl1: resolveStreamUrl(item.teams.home.name, item.teams.away.name, existingData.streamUrl1),
+        // TRIPLE STREAM SLOTS
+        streamUrl1: resolveStream(current.homeTeam, current.awayTeam, 1, existingData.streamUrl1),
+        streamUrl2: resolveStream(current.homeTeam, current.awayTeam, 2, existingData.streamUrl2),
+        streamUrl3: resolveStream(current.homeTeam, current.awayTeam, 3, existingData.streamUrl3),
         kickoffTime: new Date(item.fixture.date).toLocaleTimeString('en-GB', { 
           timeZone: 'Africa/Lagos', hour: '2-digit', minute: '2-digit', hour12: true 
         })
       };
 
       if (snap.exists) {
-        // 🏁 KICK OFF ALERT
         if (existingData.status === 'NS' && current.status === '1H') {
           await sendTelegram(`🏁 **KICK OFF!**\n\n**${current.homeTeam} vs ${current.awayTeam}** is now LIVE!\n\n👉 [WATCH NOW](https://vortexlive.online/match/${matchId})`);
         }
-        // ⚽ GOAL ALERT
         if (current.homeScore > (existingData.homeScore || 0) || current.awayScore > (existingData.awayScore || 0)) {
           await sendTelegram(`⚽ **GOAL!!**\n\n**${current.homeTeam} ${current.homeScore} - ${current.awayScore} ${current.awayTeam}**\n⏱ ${current.elapsed}' mins\n\n👉 [WATCH LIVE](https://vortexlive.online/match/${matchId})\n🎁 Code: **VORTEXLIVE**`);
         }
@@ -115,12 +123,10 @@ const syncMatches = async () => {
   } catch (error) { console.error("❌ Global Sync Error:", error.message); }
 };
 
-// INTERVAL: Check every 60 seconds
 setInterval(syncMatches, 60000);
 
 // --- ENDPOINTS ---
 
-// 1. Homepage Matches (Sorted)
 app.get('/api/matches', async (req, res) => {
   try {
     const snapshot = await db.collection('matches').get();
@@ -131,7 +137,6 @@ app.get('/api/matches', async (req, res) => {
       const liveStatuses = ['1H', '2H', 'HT', 'ET', 'P'];
       const isALive = liveStatuses.includes(a.status);
       const isBLive = liveStatuses.includes(b.status);
-
       if (isALive && !isBLive) return -1;
       if (!isALive && isBLive) return 1;
       return a.timestamp - b.timestamp;
@@ -141,7 +146,6 @@ app.get('/api/matches', async (req, res) => {
   } catch (err) { res.status(500).json({ error: "DB Error" }); }
 });
 
-// 2. Encrypted Stream Link
 app.get('/api/stream/:matchId/:serverNum', async (req, res) => {
   const { matchId, serverNum } = req.params;
   try {
@@ -154,6 +158,6 @@ app.get('/api/stream/:matchId/:serverNum', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Vortex Holistic Server Active on Port ${PORT}`);
-  syncMatches(); // Initial sync
+  console.log(`🚀 Vortex Holistic Triple-Server Active on Port ${PORT}`);
+  syncMatches();
 });
