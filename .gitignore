@@ -9,4 +9,5 @@ vortex-config-private.json
 
 # Build files
 dist/
-build/
+build/node_modules/
+.env
