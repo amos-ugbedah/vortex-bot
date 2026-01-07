@@ -79,6 +79,19 @@ async function syncMatches() {
     }
 }
 
+
+// Add this to your server.js and push to GitHub
+bot.onText(/\/list/, async (msg) => {
+    const snapshot = await db.collection('matches').limit(10).get();
+    let message = "📅 **Today's Match IDs:**\n\n";
+    snapshot.forEach(doc => {
+        const m = doc.data();
+        message += `⚽ ${m.homeTeam.name} vs ${m.awayTeam.name}\n🆔 ID: \`${doc.id}\`\n\n`;
+    });
+    bot.sendMessage(msg.chat.id, message, { parse_mode: 'Markdown' });
+});
+
+
 // --- TELEGRAM COMMANDS ---
 
 // 1. Update Server 3 (Your "Gold" Link)
