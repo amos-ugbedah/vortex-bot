@@ -1,170 +1,130 @@
 const express = require('express');
-const CryptoJS = require('crypto-js');
 const axios = require('axios');
 const admin = require('firebase-admin');
+const cron = require('node-cron'); // Ensure you run: npm install node-cron
 
-// --- 1. CONFIGURATION & INITIALIZATION ---
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Use environment variables for security
-const SECRET_KEY = process.env.STREAM_SECRET_KEY || 'Vortex_Secure_2026';
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHANNEL_ID = process.env.TELEGRAM_CHANNEL_ID;
-
-// API Keys - Your approved billing key is now prioritized at index 0
-const API_KEYS = [
-  "3671908177msh066f984698c094ap1c8360jsndb2bc44e1c65", // Approved Master Key
-  "0e3ac987340e582eb85a41758dc7c33a5dfcec72f940e836d960fe68a28fe904",
-  "0e3ac987340e582eb85a41758dc7c33a5dfcec72f940e836d960fe68a28fe904"
-].map(k => k.trim());
-
-let keyIndex = 0;
-const getAuthHeaders = () => {
-  // Logic: Always try the Master Key first, then rotate if necessary
-  const currentKey = API_KEYS[keyIndex];
-  keyIndex = (keyIndex + 1) % API_KEYS.length;
-  
-  return {
-    'X-RapidAPI-Key': currentKey,
-    'X-RapidAPI-Host': 'api-football-v1.p.rapidapi.com'
-  };
-};
-
-// Initialize Firebase
+// 1. INITIALIZATION
 const serviceAccount = require('./serviceAccountKey.json');
 if (!admin.apps.length) {
-  admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 }
 const db = admin.firestore();
 
-// --- 2. UTILITY FUNCTIONS ---
+// 2. CONFIGURATION (Direct API-Sports)
+const APISPORTS_KEY = "0131b99f8e87a724c92f8b455cc6781d";
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN; // Set in Render
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHANNEL_ID; // Set in Render
 
-const encryptUrl = (url) => {
-  if (!url) return null;
-  const payload = JSON.stringify({ url, exp: Date.now() + (3 * 60 * 60 * 1000) });
-  return CryptoJS.AES.encrypt(payload, SECRET_KEY).toString();
+// --- UTILITY: TELEGRAM SENDER ---
+const sendTelegram = async (message) => {
+    try {
+        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+            chat_id: TELEGRAM_CHAT_ID,
+            text: message,
+            parse_mode: 'Markdown'
+        });
+    } catch (e) { console.error("❌ Telegram Notify Failed"); }
 };
 
-const notifyTelegram = async (message) => {
-  try {
-    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      chat_id: TELEGRAM_CHANNEL_ID,
-      text: message,
-      parse_mode: 'Markdown'
-    });
-  } catch (err) { console.error("⚠️ Telegram notification failed"); }
-};
-
-const getStreamFallback = (home, away, server) => {
-  const query = encodeURIComponent(`${home} vs ${away} live stream free`);
-  const sources = [
-    `https://www.google.com/search?q=${query}`,
-    `https://www.bing.com/search?q=${query}`,
-    `https://duckduckgo.com/?q=${query}`
-  ];
-  return sources[server - 1] || sources[0];
-};
-
-// --- 3. CORE LOGIC (SYNC) ---
-
-const syncMatches = async () => {
-  // Get time in Nigeria format for logs
-  const logTime = new Date().toLocaleTimeString('en-GB', { timeZone: 'Africa/Lagos' });
-  console.log(`[${logTime} WAT] 🔄 Syncing matches with Master Key...`);
-
-  try {
+// --- CORE ENGINE: SYNC MATCHES ---
+const syncMatches = async (isMorningUpdate = false) => {
     const today = new Date().toISOString().split('T')[0];
-    const response = await axios.get('https://api-football-v1.p.rapidapi.com/v3/fixtures', {
-      params: { date: today },
-      headers: getAuthHeaders()
-    });
+    const logTime = new Date().toLocaleTimeString('en-GB', { timeZone: 'Africa/Lagos' });
+    
+    console.log(`[${logTime} WAT] 🔄 Fetching Live Data...`);
 
-    if (response.data.errors && Object.keys(response.data.errors).length > 0) {
-       console.error("❌ API Provider Error:", response.data.errors);
-       return;
-    }
+    try {
+        const res = await axios.get('https://v3.football.api-sports.io/fixtures', {
+            params: { date: today },
+            headers: {
+                'x-apisports-key': APISPORTS_KEY,
+                'x-apisports-host': 'v3.football.api-sports.io'
+            }
+        });
 
-    const fixtures = response.data.response || [];
-    const batch = db.batch();
+        const matches = res.data.response || [];
+        if (matches.length === 0) return;
 
-    for (const item of fixtures) {
-      const id = `match_${item.fixture.id}`;
-      const docRef = db.collection('matches').doc(id);
-      const snap = await docRef.get();
-      const existing = snap.exists ? snap.data() : {};
+        const batch = db.batch();
+        let morningSchedule = `📅 *TODAY'S FIXTURES (${today})*\n\n`;
 
-      const data = {
-        id,
-        home: { name: item.teams.home.name, logo: item.teams.home.logo, score: item.goals.home || 0 },
-        away: { name: item.teams.away.name, logo: item.teams.away.logo, score: item.goals.away || 0 },
-        status: item.fixture.status.short,
-        minute: item.fixture.status.elapsed || 0,
-        timestamp: item.fixture.timestamp,
-        kickoff: new Date(item.fixture.date).toLocaleTimeString('en-GB', { 
-          timeZone: 'Africa/Lagos', hour: '2-digit', minute: '2-digit' 
-        }),
-        stream1: existing.stream1 || getStreamFallback(item.teams.home.name, item.teams.away.name, 1),
-        stream2: existing.stream2 || getStreamFallback(item.teams.home.name, item.teams.away.name, 2),
-        stream3: existing.stream3 || getStreamFallback(item.teams.home.name, item.teams.away.name, 3)
-      };
+        for (const item of matches) {
+            const id = `match_${item.fixture.id}`;
+            const docRef = db.collection('matches').doc(id);
+            const snap = await docRef.get();
+            const old = snap.exists ? snap.data() : {};
 
-      // Smart Alerts for Kickoff and Goals
-      if (snap.exists) {
-        if (existing.status === 'NS' && data.status === '1H') {
-          await notifyTelegram(`🏁 **KICK OFF!**\n⚽ ${data.home.name} vs ${data.away.name}\n🔗 [Watch Now](https://vortexlive.online/match/${id})`);
+            const current = {
+                id,
+                home: { name: item.teams.home.name, logo: item.teams.home.logo, score: item.goals.home || 0 },
+                away: { name: item.teams.away.name, logo: item.teams.away.logo, score: item.goals.away || 0 },
+                status: item.fixture.status.short, // NS, 1H, HT, 2H, FT
+                minute: item.fixture.status.elapsed || 0,
+                kickoff: new Date(item.fixture.date).toLocaleTimeString('en-GB', { 
+                    timeZone: 'Africa/Lagos', hour: '2-digit', minute: '2-digit' 
+                }),
+                stream1: `https://www.google.com/search?q=${encodeURIComponent(item.teams.home.name + " vs " + item.teams.away.name + " live stream free")}`
+            };
+
+            // 1. LIVE GOAL ALERTS (Check if score changed)
+            if (snap.exists && current.status !== 'NS') {
+                if (current.home.score > old.home.score || current.away.score > old.away.score) {
+                    await sendTelegram(`⚽ *GOAL ALERT!!*\n\n${current.home.name} ${current.home.score} - ${current.away.score} ${current.away.name}\n⏱ Minute: ${current.minute}'`);
+                }
+            }
+
+            // 2. BUILD MORNING LIST
+            if (isMorningUpdate) {
+                morningSchedule += `⏰ ${current.kickoff} | ${current.home.name} vs ${current.away.name}\n`;
+            }
+
+            batch.set(docRef, current, { merge: true });
         }
-        if (data.home.score > (existing.home?.score || 0) || data.away.score > (existing.away?.score || 0)) {
-          await notifyTelegram(`⚽ **GOAL ALERT!**\n🏆 ${data.home.name} ${data.home.score} - ${data.away.score} ${data.away.name}\n⏱️ ${data.minute}'`);
+
+        await batch.commit();
+        console.log(`✅ Database Updated: ${matches.length} matches.`);
+
+        if (isMorningUpdate) {
+            await sendTelegram(morningSchedule + `\n🔗 Watch Live: https://vortexlive.online`);
         }
-      }
 
-      batch.set(docRef, data, { merge: true });
+    } catch (err) {
+        console.error("❌ Sync Error:", err.message);
     }
-
-    await batch.commit();
-    console.log(`✅ Successfully updated ${fixtures.length} matches for today.`);
-  } catch (err) {
-    if (err.response?.status === 403) {
-      console.error("❌ 403 Forbidden: Billing still propagating. Will retry in 60s.");
-    } else {
-      console.error("❌ Sync failed:", err.message);
-    }
-  }
 };
 
-// Sync every 60 seconds
-setInterval(syncMatches, 60000);
+// --- AUTOMATION SCHEDULES ---
 
-// --- 4. API ENDPOINTS ---
+// A. Every 2 Minutes: Update Scores & Check for Goals
+setInterval(() => syncMatches(false), 120000);
 
-app.get('/api/matches', async (req, res) => {
-  try {
-    const snap = await db.collection('matches').get();
-    const matches = snap.docs.map(doc => doc.data());
-
-    matches.sort((a, b) => {
-      const live = ['1H', '2H', 'HT', 'ET', 'P'];
-      const aLive = live.includes(a.status) ? 0 : 1;
-      const bLive = live.includes(b.status) ? 0 : 1;
-      return aLive - bLive || a.timestamp - b.timestamp;
-    });
-
-    res.json(matches);
-  } catch (err) { res.status(500).send("Database Error"); }
+// B. Every Morning at 7:30 AM WAT: Post Full Schedule to Telegram
+// '30 7 * * *' = 07:30 AM
+cron.schedule('30 7 * * *', () => {
+    syncMatches(true);
+}, {
+    scheduled: true,
+    timezone: "Africa/Lagos"
 });
 
-app.get('/api/stream/:matchId/:server', async (req, res) => {
-  try {
-    const doc = await db.collection('matches').doc(req.params.matchId).get();
-    if (!doc.exists) return res.status(404).send("Not found");
-    
-    const url = doc.data()[`stream${req.params.server}`];
-    res.json({ token: encryptUrl(url) });
-  } catch (err) { res.status(500).send("Encryption Error"); }
+// --- API ENDPOINTS ---
+app.get('/api/matches', async (req, res) => {
+    const snap = await db.collection('matches').get();
+    let list = snap.docs.map(doc => doc.data());
+    // Sort: Live matches first, then by kickoff time
+    list.sort((a, b) => {
+        const live = ['1H','2H','HT','ET','P'];
+        const aL = live.includes(a.status) ? 0 : 1;
+        const bL = live.includes(b.status) ? 0 : 1;
+        return aL - bL;
+    });
+    res.json(list);
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Vortex Pro-Server running on port ${PORT} (WAT Time)`);
-  syncMatches();
+    console.log(`🚀 Vortex Pro-Server Active (Lagos Time)`);
+    syncMatches(false); // Run once on startup
 });
